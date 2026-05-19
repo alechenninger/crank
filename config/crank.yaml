@@ -1,0 +1,25 @@
+# crank operator-attention configuration
+
+event_window_hours: 24
+
+keywords:
+  - pattern: crashloop
+    area: reliability
+    weight: 2.0
+  - pattern: oom
+    area: capacity
+    weight: 2.5
+  - pattern: privileged
+    area: security
+    weight: 3.0
+  - pattern: payment
+    area: reliability
+    weight: 2.5
+  - pattern: prod
+    area: reliability
+    weight: 1.5
+
+scoring:
+  keyword_boost_cap: 25.0
+  ml_weight: 0.7
+  # model_path: models/crank.joblib

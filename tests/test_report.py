@@ -1,0 +1,39 @@
+"""Report formatting tests."""
+
+from datetime import UTC, datetime
+
+from crank.report import format_json, format_table
+from crank.types import ClusterIdentity, ClusterScore
+
+
+def test_table_includes_rank_header() -> None:
+    score = ClusterScore(
+        identity=ClusterIdentity(name="prod"),
+        rank=1,
+        total_score=80.0,
+        ml_score=70.0,
+        keyword_boost=10.0,
+        area_contributions=(),
+        top_features=(),
+        summary="test",
+    )
+    table = format_table([score])
+    assert "RANK" in table
+    assert "prod" in table
+
+
+def test_json_output_is_valid() -> None:
+    import json
+
+    score = ClusterScore(
+        identity=ClusterIdentity(name="x"),
+        rank=1,
+        total_score=1.0,
+        ml_score=1.0,
+        keyword_boost=0.0,
+        area_contributions=(),
+        top_features=(),
+        summary="s",
+    )
+    parsed = json.loads(format_json([score]))
+    assert parsed[0]["cluster"] == "x"
