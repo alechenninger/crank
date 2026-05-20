@@ -31,7 +31,9 @@ crank rank --clusters '{"prod-us":"ctx-prod","staging":"ctx-staging"}' --format 
 crank train --dataset examples/training_dataset.jsonl --output models/crank.joblib
 ```
 
-Point `scoring.model_path` in `config/crank.yaml` at the trained model to blend ML with heuristics.
+Point `scoring.model_path` in `config/crank.yaml` at the trained model to blend ML with heuristics. Without a model, output uses `scoring_mode: heuristic` and a `base_score` from the weighted feature heuristic (not ML).
+
+Config is auto-discovered from `./config/crank.yaml` or `~/.config/crank/config.yaml` when `--config` is omitted. YAML keyword rules are merged onto built-in defaults (same `pattern` overrides the default).
 
 ## Architecture
 
@@ -77,16 +79,18 @@ See `config/crank.yaml`. Key knobs:
 Export labeled snapshots as JSONL (one object per line):
 
 ```json
-{"name": "prod-us", "label": 85, "nodes": {"total": 50, "not_ready": 2}, "pods": {"total": 800, "crash_loop_backoff": 4}, "events": {"warnings": 80}, "searchable_text": ["prod payment oom"]}
+{"name": "prod-us", "label": 85, "nodes": {"total": 50, "not_ready": 2}, "pods": {"total": 800, "crash_loop_backoff": 4}, "deployments_total": 120, "deployments_unavailable": 5, "events": {"warnings": 80}, "searchable_text": ["prod payment oom"]}
 ```
 
-`label` is how much attention the cluster deserved (0–100), e.g. from post-incident review or on-call triage. Retrain periodically so the model reflects your environment.
+`label` is how much attention the cluster deserved (0–100), e.g. from post-incident review or on-call triage. Training requires at least 10 labeled rows and prints validation MAE/R². Retrain periodically so the model reflects your environment.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
 pytest
+ruff check src tests
+mypy
 ```
 
 ## License

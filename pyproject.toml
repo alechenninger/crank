@@ -23,6 +23,9 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "types-PyYAML>=6.0.0",
 ]
 
 [project.scripts]
@@ -34,9 +37,27 @@ packages = ["src/crank"]
 [tool.hatch.build.targets.wheel.sources]
 "src/crank" = "crank"
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/crank/data" = "crank/data"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.coverage.run]
 source = ["crank"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["crank"]
+strict = true
+ignore_missing_imports = true

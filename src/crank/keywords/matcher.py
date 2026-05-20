@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from crank.config import KeywordRule, ScoringConfig
+from crank.config import ScoringConfig
 from crank.types import AreaContribution, AttentionArea, ClusterSnapshot
 
 

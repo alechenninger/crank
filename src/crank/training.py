@@ -3,42 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+from typing import Any
 
 from crank.features.extractor import FeatureExtractor
 from crank.model.scorer import ClusterScorer
-from crank.types import (
-    ClusterIdentity,
-    ClusterSnapshot,
-    EventSummary,
-    NodeState,
-    PodState,
-)
+from crank.snapshots import snapshot_from_dict
+from crank.types import ClusterSnapshot
+
+logger = logging.getLogger(__name__)
 
 
-def _snapshot_from_dict(data: dict) -> ClusterSnapshot:
-    nodes = NodeState(**data.get("nodes", {}))
-    pods = PodState(**data.get("pods", {}))
-    events = EventSummary(**data.get("events", {}))
-    identity = ClusterIdentity(
-        name=data.get("name", "unknown"),
-        context=data.get("context"),
-    )
-    return ClusterSnapshot(
-        identity=identity,
-        collected_at=data.get("collected_at"),  # type: ignore[arg-type]
-        nodes=nodes,
-        pods=pods,
-        events=events,
-        namespaces=int(data.get("namespaces", 0)),
-        deployments_unavailable=int(data.get("deployments_unavailable", 0)),
-        statefulsets_not_ready=int(data.get("statefulsets_not_ready", 0)),
-        daemonsets_misscheduled=int(data.get("daemonsets_misscheduled", 0)),
-        searchable_text=tuple(data.get("searchable_text", [])),
-    )
-
-
-def train_from_dataset(dataset_path: Path, model_output: Path) -> None:
+def train_from_dataset(dataset_path: Path, model_output: Path) -> dict[str, Any]:
     """
     Train from JSON lines: each row has snapshot fields + label (0-100).
 
@@ -51,17 +28,17 @@ def train_from_dataset(dataset_path: Path, model_output: Path) -> None:
     features_list = []
 
     with dataset_path.open(encoding="utf-8") as fh:
-        for line in fh:
+        for line_no, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:
                 continue
             row = json.loads(line)
+            if "label" not in row:
+                raise ValueError(f"line {line_no}: missing required field 'label'")
             label = float(row.pop("label"))
-            snapshots.append(_snapshot_from_dict(row))
+            snapshots.append(snapshot_from_dict(row))
             labels.append(label)
             features_list.append(extractor.extract(snapshots[-1]))
 
-    if len(snapshots) < 3:
-        raise ValueError("need at least 3 labeled snapshots to train")
-
-    ClusterScorer.train(snapshots, labels, features_list, model_output)
+    metrics = ClusterScorer.train(snapshots, labels, features_list, model_output)
+    return metrics

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 
 
-class AttentionArea(str, Enum):
+class AttentionArea(StrEnum):
     """High-level operational themes that influence ranking."""
 
     RELIABILITY = "reliability"
@@ -88,8 +88,11 @@ class ClusterSnapshot:
     pods: PodState = field(default_factory=PodState)
     events: EventSummary = field(default_factory=EventSummary)
     namespaces: int = 0
+    deployments_total: int = 0
     deployments_unavailable: int = 0
+    statefulsets_total: int = 0
     statefulsets_not_ready: int = 0
+    daemonsets_total: int = 0
     daemonsets_misscheduled: int = 0
     # Raw text blobs for keyword matching (names, reasons, messages).
     searchable_text: tuple[str, ...] = field(default_factory=tuple)
@@ -115,6 +118,13 @@ class AreaContribution:
     matched_keywords: tuple[str, ...] = field(default_factory=tuple)
 
 
+class ScoringMode(StrEnum):
+    """How the base attention score was produced."""
+
+    HEURISTIC = "heuristic"
+    BLENDED = "blended"
+
+
 @dataclass
 class ClusterScore:
     """Final ranking output for one cluster."""
@@ -122,7 +132,8 @@ class ClusterScore:
     identity: ClusterIdentity
     rank: int
     total_score: float
-    ml_score: float
+    base_score: float
+    scoring_mode: ScoringMode
     keyword_boost: float
     area_contributions: tuple[AreaContribution, ...]
     top_features: tuple[tuple[str, float], ...]

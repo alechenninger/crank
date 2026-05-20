@@ -3,56 +3,39 @@
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from pathlib import Path
 
 import click
 
-from crank.collector.fake import FakeCollector
 from crank.collector.kubernetes import KubernetesCollector
 from crank.config import load_config
+from crank.logging_config import configure_logging
 from crank.report import format_json, format_table
+from crank.resources import demo_clusters_path
 from crank.scoring.ranker import ClusterRanker
+from crank.snapshots import load_snapshots_jsonl
 from crank.training import train_from_dataset
-from crank.types import (
-    ClusterIdentity,
-    ClusterSnapshot,
-    EventSummary,
-    NodeState,
-    PodState,
-)
+
+logger = logging.getLogger(__name__)
 
 
-def _load_demo_snapshots(path: Path) -> list[ClusterSnapshot]:
-    snapshots: list[ClusterSnapshot] = []
-    with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            data = json.loads(line)
-            name = data.pop("name", "demo")
-            identity = ClusterIdentity(name=name, context=data.pop("context", None))
-            snapshots.append(
-                ClusterSnapshot(
-                    identity=identity,
-                    collected_at=data.get("collected_at"),  # type: ignore[arg-type]
-                    nodes=NodeState(**data.get("nodes", {})),
-                    pods=PodState(**data.get("pods", {})),
-                    events=EventSummary(**data.get("events", {})),
-                    namespaces=int(data.get("namespaces", 1)),
-                    deployments_unavailable=int(data.get("deployments_unavailable", 0)),
-                    statefulsets_not_ready=int(data.get("statefulsets_not_ready", 0)),
-                    daemonsets_misscheduled=int(data.get("daemonsets_misscheduled", 0)),
-                    searchable_text=tuple(data.get("searchable_text", [])),
-                )
-            )
-    return snapshots
+def _resolve_config(path: Path | None) -> Path | None:
+    if path is not None and not path.exists():
+        raise click.BadParameter(f"config file not found: {path}")
+    return path
 
 
 @click.group()
+@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
 @click.version_option()
-def main() -> None:
+@click.pass_context
+def main(ctx: click.Context, verbose: bool) -> None:
     """Rank Kubernetes clusters by operator attention (ML + keywords)."""
+    configure_logging(verbose=verbose)
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
 
 
 @main.command("score")
@@ -62,7 +45,9 @@ def main() -> None:
 @click.option("--kubeconfig", type=click.Path(path_type=Path), default=None)
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 @click.option("--demo", is_flag=True, help="Use built-in demo snapshot (no API)")
+@click.pass_context
 def score(
+    ctx: click.Context,
     config_path: Path | None,
     cluster_name: str,
     context: str | None,
@@ -71,23 +56,34 @@ def score(
     demo: bool,
 ) -> None:
     """Score a single cluster from live API or demo mode."""
-    cfg = load_config(config_path)
-    ranker = ClusterRanker(cfg)
-    if demo:
-        demo_path = Path(__file__).resolve().parents[2] / "examples" / "demo_clusters.jsonl"
-        snaps = _load_demo_snapshots(demo_path)
-        match = next((s for s in snaps if s.identity.name == cluster_name), snaps[0])
-        results = ranker.rank_snapshots([match])
-    else:
-        collector = KubernetesCollector(
-            cluster_name=cluster_name,
-            context=context,
-            event_window_hours=cfg.event_window_hours,
-            kubeconfig=str(kubeconfig) if kubeconfig else None,
-        )
-        results = ranker.rank([collector])
-    output = format_json(results) if fmt == "json" else format_table(results)
-    click.echo(output)
+    exit_code = 0
+    try:
+        cfg = load_config(_resolve_config(config_path))
+        ranker = ClusterRanker(cfg)
+        if demo:
+            snaps = load_snapshots_jsonl(demo_clusters_path())
+            match = next((s for s in snaps if s.identity.name == cluster_name), snaps[0])
+            results = ranker.rank_snapshots([match])
+        else:
+            collector = KubernetesCollector(
+                cluster_name=cluster_name,
+                context=context,
+                event_window_hours=cfg.event_window_hours,
+                kubeconfig=str(kubeconfig) if kubeconfig else None,
+            )
+            results = ranker.rank([collector])
+        if not results:
+            click.echo("No clusters scored.", err=True)
+            sys.exit(1)
+        output = format_json(results) if fmt == "json" else format_table(results)
+        click.echo(output)
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        logger.exception("score failed")
+        click.echo(f"error: {exc}", err=True)
+        exit_code = 1
+    sys.exit(exit_code)
 
 
 @main.command("rank")
@@ -100,7 +96,9 @@ def score(
 @click.option("--kubeconfig", type=click.Path(path_type=Path), default=None)
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 @click.option("--demo", is_flag=True, help="Rank example clusters from examples/")
+@click.pass_context
 def rank(
+    ctx: click.Context,
     config_path: Path | None,
     clusters: str,
     kubeconfig: Path | None,
@@ -108,27 +106,41 @@ def rank(
     demo: bool,
 ) -> None:
     """Rank multiple clusters (highest attention first)."""
-    cfg = load_config(config_path)
-    ranker = ClusterRanker(cfg)
-    if demo:
-        demo_path = Path(__file__).resolve().parents[2] / "examples" / "demo_clusters.jsonl"
-        results = ranker.rank_snapshots(_load_demo_snapshots(demo_path))
-    elif not clusters:
-        raise click.UsageError("--clusters is required unless --demo is set")
-    else:
-        mapping: dict[str, str | None] = json.loads(clusters)
-        collectors = [
-            KubernetesCollector(
-                cluster_name=name,
-                context=ctx,
-                event_window_hours=cfg.event_window_hours,
-                kubeconfig=str(kubeconfig) if kubeconfig else None,
-            )
-            for name, ctx in mapping.items()
-        ]
-        results = ranker.rank(collectors)
-    output = format_json(results) if fmt == "json" else format_table(results)
-    click.echo(output)
+    exit_code = 0
+    try:
+        cfg = load_config(_resolve_config(config_path))
+        ranker = ClusterRanker(cfg)
+        if demo:
+            results = ranker.rank_snapshots(load_snapshots_jsonl(demo_clusters_path()))
+        elif not clusters:
+            raise click.UsageError("--clusters is required unless --demo is set")
+        else:
+            try:
+                mapping: dict[str, str | None] = json.loads(clusters)
+            except json.JSONDecodeError as exc:
+                raise click.BadParameter(f"invalid --clusters JSON: {exc}") from exc
+            collectors = [
+                KubernetesCollector(
+                    cluster_name=name,
+                    context=ctx_name,
+                    event_window_hours=cfg.event_window_hours,
+                    kubeconfig=str(kubeconfig) if kubeconfig else None,
+                )
+                for name, ctx_name in mapping.items()
+            ]
+            results = ranker.rank(collectors)
+        if not results:
+            click.echo("No clusters scored.", err=True)
+            sys.exit(1)
+        output = format_json(results) if fmt == "json" else format_table(results)
+        click.echo(output)
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        logger.exception("rank failed")
+        click.echo(f"error: {exc}", err=True)
+        exit_code = 1
+    sys.exit(exit_code)
 
 
 @main.command("train")
@@ -136,8 +148,19 @@ def rank(
 @click.option("--output", type=click.Path(path_type=Path), required=True)
 def train(dataset: Path, output: Path) -> None:
     """Train ML model from labeled JSONL snapshots."""
-    train_from_dataset(dataset, output)
-    click.echo(f"Model written to {output}")
+    exit_code = 0
+    try:
+        metrics = train_from_dataset(dataset, output)
+        click.echo(f"Model written to {output}")
+        if metrics:
+            click.echo(
+                f"validation: mae={metrics.get('mae', 0):.2f} r2={metrics.get('r2', 0):.3f}"
+            )
+    except Exception as exc:
+        logger.exception("train failed")
+        click.echo(f"error: {exc}", err=True)
+        exit_code = 1
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

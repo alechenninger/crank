@@ -12,13 +12,15 @@ def format_table(scores: list[ClusterScore]) -> str:
     if not scores:
         return "No clusters scored."
     lines = [
-        "RANK  SCORE   ML     KW     CLUSTER              SUMMARY",
-        "----  -----   ----   ----   -------------------  -------",
+        "RANK  SCORE   BASE   MODE        KW     CLUSTER              SUMMARY",
+        "----  -----   ----   ----------  ----   -------------------  -------",
     ]
     for s in scores:
         name = s.identity.name[:19].ljust(19)
+        mode = s.scoring_mode.value[:10].ljust(10)
         lines.append(
-            f"{s.rank:4}  {s.total_score:5.1f}  {s.ml_score:5.1f}  {s.keyword_boost:5.1f}  {name}  {s.summary}"
+            f"{s.rank:4}  {s.total_score:5.1f}  {s.base_score:5.1f}  {mode}  "
+            f"{s.keyword_boost:5.1f}  {name}  {s.summary}"
         )
     return "\n".join(lines)
 
@@ -32,7 +34,8 @@ def format_json(scores: list[ClusterScore]) -> str:
                 "cluster": s.identity.name,
                 "context": s.identity.context,
                 "total_score": s.total_score,
-                "ml_score": s.ml_score,
+                "base_score": s.base_score,
+                "scoring_mode": s.scoring_mode.value,
                 "keyword_boost": s.keyword_boost,
                 "areas": [
                     {

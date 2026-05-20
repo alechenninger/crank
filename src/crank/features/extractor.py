@@ -6,6 +6,11 @@ import math
 
 from crank.types import ClusterSnapshot, FeatureVector
 
+# Indices of ratio features in FEATURE_NAMES (bounded 0–1); others are rates or scaled age.
+RATIO_FEATURE_INDICES: frozenset[int] = frozenset(
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19}
+)
+
 FEATURE_NAMES: tuple[str, ...] = (
     "node_not_ready_ratio",
     "node_pressure_ratio",
@@ -53,9 +58,21 @@ class FeatureExtractor:
         events = snapshot.events
         node_denom = max(nodes.total, 1)
         pod_denom = max(pods.total, 1)
-        deploy_denom = max(snapshot.deployments_unavailable + 1, 1)
-        sts_denom = max(snapshot.statefulsets_not_ready + 1, 1)
-        ds_denom = max(snapshot.daemonsets_misscheduled + 1, 1)
+        deploy_denom = max(
+            snapshot.deployments_total,
+            snapshot.deployments_unavailable,
+            1,
+        )
+        sts_denom = max(
+            snapshot.statefulsets_total,
+            snapshot.statefulsets_not_ready,
+            1,
+        )
+        ds_denom = max(
+            snapshot.daemonsets_total,
+            snapshot.daemonsets_misscheduled,
+            1,
+        )
         pressure = nodes.memory_pressure + nodes.disk_pressure + nodes.pid_pressure
 
         values = (

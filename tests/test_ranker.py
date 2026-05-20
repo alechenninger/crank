@@ -1,15 +1,18 @@
 """End-to-end ranking tests."""
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from crank.config import ScoringConfig
 from crank.scoring.ranker import ClusterRanker
+from crank.snapshots import load_snapshots_jsonl
 from crank.types import (
     ClusterIdentity,
     ClusterSnapshot,
     EventSummary,
     NodeState,
     PodState,
+    ScoringMode,
 )
 
 
@@ -40,32 +43,13 @@ def test_unhealthy_cluster_ranks_above_healthy() -> None:
     )
     assert scores[0].identity.name == "sick"
     assert scores[0].total_score > scores[1].total_score
+    assert scores[0].scoring_mode == ScoringMode.HEURISTIC
 
 
 def test_pci_prod_cluster_scores_highest_in_demo_set() -> None:
     """Regression: prod-eu-pci demo should beat dev-eu."""
-    import json
-    from pathlib import Path
-
     path = Path(__file__).resolve().parents[1] / "examples" / "demo_clusters.jsonl"
-    snapshots: list[ClusterSnapshot] = []
-    with path.open() as fh:
-        for line in fh:
-            data = json.loads(line)
-            snapshots.append(
-                ClusterSnapshot(
-                    identity=ClusterIdentity(name=data["name"]),
-                    collected_at=datetime.now(UTC),
-                    nodes=NodeState(**data.get("nodes", {})),
-                    pods=PodState(**data.get("pods", {})),
-                    events=EventSummary(**data.get("events", {})),
-                    namespaces=data.get("namespaces", 0),
-                    deployments_unavailable=data.get("deployments_unavailable", 0),
-                    statefulsets_not_ready=data.get("statefulsets_not_ready", 0),
-                    daemonsets_misscheduled=data.get("daemonsets_misscheduled", 0),
-                    searchable_text=tuple(data.get("searchable_text", [])),
-                )
-            )
+    snapshots = load_snapshots_jsonl(path)
     scores = ClusterRanker(ScoringConfig()).rank_snapshots(snapshots)
     assert scores[0].identity.name == "prod-eu-pci"
     assert scores[-1].identity.name == "dev-eu"
