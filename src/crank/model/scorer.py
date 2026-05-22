@@ -3,28 +3,28 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import UTC, datetime
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
 import sklearn
-from sklearn.ensemble import GradientBoostingRegressor, IsolationForest
-from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import train_test_split
+from scipy.stats import kendalltau
+from sklearn.linear_model import LogisticRegression
 
-from crank.config import ScoringConfig
-from crank.features.extractor import FEATURE_NAMES
+from crank.features.extractor import FEATURE_NAMES, N_BASE_FEATURES
 from crank.types import ClusterSnapshot, FeatureVector, ScoringMode
 
 logger = logging.getLogger(__name__)
 
 MIN_TRAINING_SAMPLES = 10
-MODEL_SCHEMA_VERSION = 1
+MODEL_SCHEMA_VERSION = 3
 
-# Hand-tuned weights aligned with feature order (used when no trained model exists).
 HEURISTIC_WEIGHTS: tuple[float, ...] = (
+    # --- base features (cluster state + events) ---
     18.0,  # node_not_ready_ratio
     12.0,  # node_pressure_ratio
     15.0,  # pod_failed_ratio
@@ -45,6 +45,12 @@ HEURISTIC_WEIGHTS: tuple[float, ...] = (
     12.0,  # deployment_unavailable_ratio
     11.0,  # statefulset_not_ready_ratio
     10.0,  # daemonset_misscheduled_ratio
+    # --- keyword features (already weighted by keyword rules, pass through) ---
+    1.0,   # keyword_reliability
+    1.0,   # keyword_security
+    1.0,   # keyword_capacity
+    1.0,   # keyword_compliance
+    1.0,   # keyword_platform
 )
 
 
@@ -61,6 +67,43 @@ def _validate_feature_names(stored: object) -> None:
         raise ModelSchemaError(
             f"model feature_names {stored!r} do not match current schema {FEATURE_NAMES!r}"
         )
+
+
+def _generate_pairs(
+    X: np.ndarray,
+    ranks: list[int],
+    session_ids: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate pairwise training samples from ranked sessions.
+
+    For each session, every pair (i, j) where rank[i] < rank[j]
+    (lower rank = more attention) produces two symmetric rows so that
+    LogisticRegression sees both classes:
+
+    - X[i] - X[j] with label 1  (preferred first)
+    - X[j] - X[i] with label 0  (non-preferred first)
+    """
+    groups: dict[str, list[int]] = defaultdict(list)
+    for idx, sid in enumerate(session_ids):
+        groups[sid].append(idx)
+
+    diffs: list[np.ndarray] = []
+    labels: list[int] = []
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        for i, j in combinations(indices, 2):
+            if ranks[i] < ranks[j]:
+                preferred, other = i, j
+            elif ranks[j] < ranks[i]:
+                preferred, other = j, i
+            else:
+                continue
+            diffs.append(X[preferred] - X[other])
+            labels.append(1)
+            diffs.append(X[other] - X[preferred])
+            labels.append(0)
+    return np.array(diffs), np.array(labels)
 
 
 class HeuristicScorer:
@@ -85,18 +128,20 @@ class HeuristicScorer:
 
 class ClusterScorer:
     """
-    Hybrid scorer: Gradient Boosting when a model is trained, else heuristic.
+    Pairwise-trained pointwise scorer, with heuristic fallback.
 
-    An IsolationForest anomaly score can augment ranking for outlier clusters.
+    When a trained model is available, ``score = coef . features`` is
+    calibrated to 0-100 via min-max scaling learned at training time.
+    Without a model, a hand-tuned weighted heuristic is used.
     """
 
-    def __init__(self, config: ScoringConfig) -> None:
-        self._config = config
+    def __init__(self, model_path: Path | None = None) -> None:
         self._heuristic = HeuristicScorer()
-        self._regressor: GradientBoostingRegressor | None = None
-        self._anomaly: IsolationForest | None = None
-        if config.model_path and config.model_path.exists():
-            payload = joblib.load(config.model_path)
+        self._coef: np.ndarray | None = None
+        self._cal_min: float = 0.0
+        self._cal_max: float = 1.0
+        if model_path and model_path.exists():
+            payload = joblib.load(model_path)
             _validate_feature_names(payload.get("feature_names"))
             schema = payload.get("schema_version")
             if schema is not None and schema != MODEL_SCHEMA_VERSION:
@@ -105,40 +150,36 @@ class ClusterScorer:
                     schema,
                     MODEL_SCHEMA_VERSION,
                 )
-            self._regressor = payload.get("regressor")
-            self._anomaly = payload.get("anomaly")
-            logger.info("Loaded trained model from %s", config.model_path)
+            self._coef = payload.get("coef")
+            self._cal_min = float(payload.get("calibration_min", 0.0))
+            self._cal_max = float(payload.get("calibration_max", 1.0))
+            logger.info("Loaded trained model from %s", model_path)
 
     @property
     def has_trained_model(self) -> bool:
-        return self._regressor is not None
+        return self._coef is not None
 
     def scoring_mode(self) -> ScoringMode:
-        return ScoringMode.BLENDED if self._regressor is not None else ScoringMode.HEURISTIC
+        return ScoringMode.ML if self._coef is not None else ScoringMode.HEURISTIC
 
     def score_vector(self, features: FeatureVector) -> float:
-        heuristic = self._heuristic.score(features)
-        if self._regressor is None:
-            return heuristic
-        X = np.array([features.values])
-        ml = float(self._regressor.predict(X)[0])
-        ml = max(0.0, min(ml, 100.0))
-        if self._anomaly is not None:
-            decision = float(self._anomaly.decision_function(X)[0])
-            anomaly_boost = max(0.0, min(15.0, (0.5 - decision) * 10.0))
-            ml = min(100.0, ml + anomaly_boost)
-        weight = self._config.ml_weight
-        return weight * ml + (1.0 - weight) * heuristic
+        if self._coef is None:
+            return self._heuristic.score(features)
+        raw = float(np.dot(self._coef, features.values))
+        span = self._cal_max - self._cal_min
+        if span <= 0:
+            return 50.0
+        scaled = 100.0 * (raw - self._cal_min) / span
+        return max(0.0, min(scaled, 100.0))
 
     def top_features(
         self, features: FeatureVector, limit: int = 5
     ) -> tuple[tuple[str, float], ...]:
-        if self._regressor is not None and hasattr(self._regressor, "feature_importances_"):
-            importances = self._regressor.feature_importances_
+        if self._coef is not None:
             contributions = [
-                (name, float(imp) * val)
-                for name, imp, val in zip(
-                    features.names, importances, features.values, strict=True
+                (name, float(coef) * val)
+                for name, coef, val in zip(
+                    features.names, self._coef, features.values, strict=True
                 )
             ]
             contributions.sort(key=lambda x: x[1], reverse=True)
@@ -147,51 +188,76 @@ class ClusterScorer:
                 return top
         return self._heuristic.top_features(features, limit=limit)
 
+    def keyword_contribution(self, features: FeatureVector) -> float:
+        """Portion of the score attributable to keyword features."""
+        kw_values = features.values[N_BASE_FEATURES:]
+        if self._coef is not None:
+            kw_coefs = self._coef[N_BASE_FEATURES:]
+            return max(0.0, float(np.dot(kw_coefs, kw_values)))
+        kw_weights = HEURISTIC_WEIGHTS[N_BASE_FEATURES:]
+        return max(0.0, sum(w * v for w, v in zip(kw_weights, kw_values, strict=True)))
+
     @staticmethod
     def train(
         snapshots: list[ClusterSnapshot],
-        labels: list[float],
+        ranks: list[int],
+        session_ids: list[str],
         features: list[FeatureVector],
         output: Path,
     ) -> dict[str, Any]:
-        """Train regressor + anomaly detector from labeled snapshots."""
+        """Train pairwise logistic regression from ranked sessions."""
         if len(snapshots) < MIN_TRAINING_SAMPLES:
             raise ValueError(
-                f"need at least {MIN_TRAINING_SAMPLES} labeled snapshots to train, "
+                f"need at least {MIN_TRAINING_SAMPLES} snapshots to train, "
                 f"got {len(snapshots)}"
             )
 
         X = np.array([f.values for f in features])
-        y = np.array(labels, dtype=float)
+        X_pairs, y_pairs = _generate_pairs(X, ranks, session_ids)
 
-        metrics: dict[str, Any] = {}
-        if len(snapshots) >= 12:
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=0.25, random_state=42
+        if len(X_pairs) == 0:
+            raise ValueError(
+                "no valid pairs generated; each session needs at least 2 ranked snapshots"
             )
-        else:
-            X_train, y_train = X, y
-            X_val, y_val = X, y
 
-        regressor = GradientBoostingRegressor(
-            n_estimators=120,
-            max_depth=4,
-            learning_rate=0.08,
-            random_state=42,
-        )
-        regressor.fit(X_train, y_train)
-        val_pred = regressor.predict(X_val)
-        metrics["mae"] = float(mean_absolute_error(y_val, val_pred))
-        metrics["r2"] = float(r2_score(y_val, val_pred))
+        clf = LogisticRegression(fit_intercept=False, C=1.0, max_iter=1000)
+        clf.fit(X_pairs, y_pairs)
+        coef = clf.coef_[0]
 
-        contamination = min(0.15, max(0.05, 2.0 / len(snapshots)))
-        anomaly = IsolationForest(contamination=contamination, random_state=42)
-        anomaly.fit(X)
+        raw_scores = X @ coef
+        cal_min = float(raw_scores.min())
+        cal_max = float(raw_scores.max())
+
+        pair_correct = 0
+        pair_total = 0
+        groups: dict[str, list[int]] = defaultdict(list)
+        for idx, sid in enumerate(session_ids):
+            groups[sid].append(idx)
+        for indices in groups.values():
+            for i, j in combinations(indices, 2):
+                if ranks[i] == ranks[j]:
+                    continue
+                pair_total += 1
+                if (ranks[i] < ranks[j]) == (raw_scores[i] > raw_scores[j]):
+                    pair_correct += 1
+
+        pairwise_accuracy = pair_correct / pair_total if pair_total > 0 else 0.0
+
+        # Higher raw score should correlate with lower rank (more attention),
+        # so negate ranks for a positive tau when ordering is correct.
+        tau, _ = kendalltau(raw_scores, [-r for r in ranks])
+
+        metrics: dict[str, Any] = {
+            "pairwise_accuracy": float(pairwise_accuracy),
+            "kendall_tau": float(tau),
+            "n_pairs": len(X_pairs),
+        }
 
         output.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "regressor": regressor,
-            "anomaly": anomaly,
+            "coef": coef,
+            "calibration_min": cal_min,
+            "calibration_max": cal_max,
             "feature_names": FEATURE_NAMES,
             "schema_version": MODEL_SCHEMA_VERSION,
             "trained_at": datetime.now(UTC).isoformat(),
@@ -201,9 +267,10 @@ class ClusterScorer:
         }
         joblib.dump(payload, output)
         logger.info(
-            "Trained model: n=%s mae=%.2f r2=%.3f",
+            "Trained model: n=%s pairs=%s pairwise_acc=%.3f tau=%.3f",
             len(snapshots),
-            metrics["mae"],
-            metrics["r2"],
+            len(X_pairs),
+            pairwise_accuracy,
+            tau,
         )
         return metrics

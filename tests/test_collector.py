@@ -64,6 +64,19 @@ def _deployment(desired: int = 3, available: int = 3) -> SimpleNamespace:
     )
 
 
+def _statefulset(desired: int = 3, ready: int = 3) -> SimpleNamespace:
+    return SimpleNamespace(
+        spec=SimpleNamespace(replicas=desired),
+        status=SimpleNamespace(ready_replicas=ready),
+    )
+
+
+def _daemonset(misscheduled: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(
+        status=SimpleNamespace(number_misscheduled=misscheduled),
+    )
+
+
 def _event(reason: str, message: str = "", hours_ago: float = 1.0) -> SimpleNamespace:
     ts = datetime.now(UTC) - timedelta(hours=hours_ago)
     return SimpleNamespace(

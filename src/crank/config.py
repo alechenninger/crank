@@ -36,8 +36,6 @@ class ScoringConfig:
     keyword_rules: list[KeywordRule] = field(default_factory=_default_keyword_rules)
     keyword_boost_cap: float = 25.0
     model_path: Path | None = None
-    # Blend: final = ml_weight * ml + (1 - ml_weight) * heuristic when a model exists.
-    ml_weight: float = 0.7
 
 
 DEFAULT_KEYWORD_RULES: list[KeywordRule] = [
@@ -125,5 +123,4 @@ def load_config(path: Path | None) -> ScoringConfig:
         keyword_rules=rules,
         keyword_boost_cap=float(scoring.get("keyword_boost_cap", 25.0)),
         model_path=Path(scoring["model_path"]) if scoring.get("model_path") else None,
-        ml_weight=float(scoring.get("ml_weight", 0.7)),
     )

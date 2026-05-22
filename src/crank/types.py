@@ -119,10 +119,10 @@ class AreaContribution:
 
 
 class ScoringMode(StrEnum):
-    """How the base attention score was produced."""
+    """How the attention score was produced."""
 
     HEURISTIC = "heuristic"
-    BLENDED = "blended"
+    ML = "ml"
 
 
 @dataclass

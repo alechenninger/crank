@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def _summarize(
     snapshot: ClusterSnapshot,
-    base_score: float,
+    total_score: float,
     scoring_mode: ScoringMode,
     keyword_boost: float,
     areas: tuple[AreaContribution, ...],
@@ -41,7 +41,7 @@ def _summarize(
         parts.append("no critical signals; baseline attention")
     mode_label = scoring_mode.value
     return (
-        f"base={base_score:.1f} mode={mode_label} keyword_boost={keyword_boost:.1f}; "
+        f"score={total_score:.1f} mode={mode_label} keyword_boost={keyword_boost:.1f}; "
         + "; ".join(parts)
     )
 
@@ -53,24 +53,27 @@ class ClusterRanker:
         self._config = config
         self._extractor = FeatureExtractor()
         self._matcher = KeywordMatcher(config)
-        self._scorer = ClusterScorer(config)
+        self._scorer = ClusterScorer(model_path=config.model_path)
 
     def score_snapshot(self, snapshot: ClusterSnapshot) -> ClusterScore:
-        features = self._extractor.extract(snapshot)
-        base_score = self._scorer.score_vector(features)
+        _, areas = self._matcher.match(snapshot)
+        features = self._extractor.extract_full(snapshot, areas)
+        total_score = self._scorer.score_vector(features)
         scoring_mode = self._scorer.scoring_mode()
-        keyword_boost, areas = self._matcher.match(snapshot)
-        total = min(100.0, base_score + keyword_boost)
+        keyword_boost = self._scorer.keyword_contribution(features)
+
+        base_score = total_score - keyword_boost
+
         return ClusterScore(
             identity=snapshot.identity,
             rank=0,
-            total_score=round(total, 2),
+            total_score=round(total_score, 2),
             base_score=round(base_score, 2),
             scoring_mode=scoring_mode,
             keyword_boost=round(keyword_boost, 2),
             area_contributions=areas,
             top_features=self._scorer.top_features(features),
-            summary=_summarize(snapshot, base_score, scoring_mode, keyword_boost, areas),
+            summary=_summarize(snapshot, total_score, scoring_mode, keyword_boost, areas),
         )
 
     def rank(self, collectors: Sequence[ClusterCollector]) -> list[ClusterScore]:

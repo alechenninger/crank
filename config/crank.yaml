@@ -21,5 +21,4 @@ keywords:
 
 scoring:
   keyword_boost_cap: 25.0
-  ml_weight: 0.7
   # model_path: models/crank.joblib

@@ -3,11 +3,17 @@
 from datetime import UTC, datetime
 
 from crank.features.extractor import (
+    BASE_FEATURE_NAMES,
     FEATURE_NAMES,
+    KEYWORD_FEATURE_NAMES,
+    N_BASE_FEATURES,
     RATIO_FEATURE_INDICES,
     FeatureExtractor,
+    keyword_feature_values,
 )
 from crank.types import (
+    AreaContribution,
+    AttentionArea,
     ClusterIdentity,
     ClusterSnapshot,
     EventSummary,
@@ -16,7 +22,7 @@ from crank.types import (
 )
 
 
-def test_feature_vector_length_matches_names() -> None:
+def test_base_feature_vector_length_matches_names() -> None:
     snap = ClusterSnapshot(
         identity=ClusterIdentity(name="t"),
         collected_at=datetime.now(UTC),
@@ -25,8 +31,36 @@ def test_feature_vector_length_matches_names() -> None:
         events=EventSummary(warnings=24, window_hours=24),
     )
     fv = FeatureExtractor().extract(snap)
+    assert len(fv.names) == len(BASE_FEATURE_NAMES)
+    assert len(fv.values) == len(BASE_FEATURE_NAMES)
+
+
+def test_full_feature_vector_includes_keyword_features() -> None:
+    snap = ClusterSnapshot(
+        identity=ClusterIdentity(name="t"),
+        collected_at=datetime.now(UTC),
+        nodes=NodeState(total=10, not_ready=2),
+        pods=PodState(total=100, crash_loop_backoff=5),
+        events=EventSummary(warnings=24, window_hours=24),
+    )
+    areas = (
+        AreaContribution(
+            area=AttentionArea.RELIABILITY,
+            score=3.5,
+            matched_keywords=("crashloop",),
+        ),
+    )
+    fv = FeatureExtractor().extract_full(snap, areas)
     assert len(fv.names) == len(FEATURE_NAMES)
     assert len(fv.values) == len(FEATURE_NAMES)
+    d = fv.as_dict()
+    assert d["keyword_reliability"] == 3.5
+    assert d["keyword_security"] == 0.0
+
+
+def test_feature_names_are_base_plus_keyword() -> None:
+    assert FEATURE_NAMES == BASE_FEATURE_NAMES + KEYWORD_FEATURE_NAMES
+    assert N_BASE_FEATURES == len(BASE_FEATURE_NAMES)
 
 
 def test_ratio_features_are_bounded() -> None:
@@ -49,7 +83,7 @@ def test_event_rate_features_are_non_negative() -> None:
         events=EventSummary(warnings=100, errors=50, window_hours=24),
     )
     fv = FeatureExtractor().extract(snap)
-    rate_indices = set(range(len(FEATURE_NAMES))) - RATIO_FEATURE_INDICES
+    rate_indices = set(range(len(BASE_FEATURE_NAMES))) - RATIO_FEATURE_INDICES
     for i in rate_indices:
         assert fv.values[i] >= 0.0, f"{fv.names[i]}={fv.values[i]}"
 
@@ -74,3 +108,17 @@ def test_workload_ratios_use_totals_not_unavailable_only() -> None:
     assert large_ratio < small_ratio
     assert abs(large_ratio - 0.12) < 0.01
     assert abs(small_ratio - 1.0) < 0.01
+
+
+def test_keyword_feature_values_from_area_contributions() -> None:
+    areas = (
+        AreaContribution(area=AttentionArea.SECURITY, score=3.0),
+        AreaContribution(area=AttentionArea.CAPACITY, score=2.5),
+    )
+    values = keyword_feature_values(areas)
+    assert len(values) == len(AttentionArea)
+    assert values[0] == 0.0   # reliability
+    assert values[1] == 3.0   # security
+    assert values[2] == 2.5   # capacity
+    assert values[3] == 0.0   # compliance
+    assert values[4] == 0.0   # platform

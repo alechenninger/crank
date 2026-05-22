@@ -144,17 +144,21 @@ def rank(
 
 
 @main.command("train")
+@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
 @click.option("--dataset", type=click.Path(path_type=Path, exists=True), required=True)
 @click.option("--output", type=click.Path(path_type=Path), required=True)
-def train(dataset: Path, output: Path) -> None:
-    """Train ML model from labeled JSONL snapshots."""
+def train(config_path: Path | None, dataset: Path, output: Path) -> None:
+    """Train ML model from ranked-session JSONL snapshots."""
     exit_code = 0
     try:
-        metrics = train_from_dataset(dataset, output)
+        cfg = load_config(_resolve_config(config_path))
+        metrics = train_from_dataset(dataset, output, config=cfg)
         click.echo(f"Model written to {output}")
         if metrics:
             click.echo(
-                f"validation: mae={metrics.get('mae', 0):.2f} r2={metrics.get('r2', 0):.3f}"
+                f"pairwise_accuracy={metrics.get('pairwise_accuracy', 0):.3f} "
+                f"kendall_tau={metrics.get('kendall_tau', 0):.3f} "
+                f"n_pairs={metrics.get('n_pairs', 0)}"
             )
     except Exception as exc:
         logger.exception("train failed")

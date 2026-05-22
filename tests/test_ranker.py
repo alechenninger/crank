@@ -46,6 +46,18 @@ def test_unhealthy_cluster_ranks_above_healthy() -> None:
     assert scores[0].scoring_mode == ScoringMode.HEURISTIC
 
 
+def test_keyword_boost_integrated_into_total_score() -> None:
+    """Keywords now flow through the feature vector, not as a separate additive term."""
+    ranker = ClusterRanker(ScoringConfig())
+    no_kw = ranker.score_snapshot(_snap("bare", not_ready=2, crash=3))
+    with_kw = ranker.score_snapshot(
+        _snap("flagged", not_ready=2, crash=3, text="prod payment privileged oom")
+    )
+    assert with_kw.total_score > no_kw.total_score
+    assert with_kw.keyword_boost > 0.0
+    assert no_kw.keyword_boost == 0.0
+
+
 def test_pci_prod_cluster_scores_highest_in_demo_set() -> None:
     """Regression: prod-eu-pci demo should beat dev-eu."""
     path = Path(__file__).resolve().parents[1] / "examples" / "demo_clusters.jsonl"

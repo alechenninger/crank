@@ -38,6 +38,8 @@ def snapshot_from_dict(data: dict[str, Any]) -> ClusterSnapshot:
     name = payload.pop("name", "unknown")
     context = payload.pop("context", None)
     payload.pop("label", None)
+    payload.pop("session", None)
+    payload.pop("rank", None)
     identity = ClusterIdentity(name=name, context=context)
     return ClusterSnapshot(
         identity=identity,

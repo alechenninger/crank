@@ -9,7 +9,7 @@
 | **State** | Shows durable problems (CrashLoopBackOff, NotReady nodes, privileged pods) | Misses flapping or already-recovered incidents |
 | **Events** | Captures incident velocity and recent failures | Noisy; decays without tuning |
 
-crank merges both into a single feature vector, then scores with a weighted heuristic (no model required) or a trained **Gradient Boosting** regressor with **Isolation Forest** anomaly boost.
+crank merges both into a single feature vector, then scores with a weighted heuristic (no model required) or a **pairwise-trained linear model**. Keyword area scores are fed directly into the feature vector so the model can learn interactions between cluster health and operator-interest context.
 
 ## Quick start
 
@@ -27,27 +27,31 @@ crank score --cluster prod-us-east --context my-prod-context
 # Rank multiple clusters
 crank rank --clusters '{"prod-us":"ctx-prod","staging":"ctx-staging"}' --format json
 
-# Train from operator labels (0–100 attention score per snapshot)
+# Train from ranked sessions (see "Training with operator feedback" below)
 crank train --dataset examples/training_dataset.jsonl --output models/crank.joblib
 ```
 
-Point `scoring.model_path` in `config/crank.yaml` at the trained model to blend ML with heuristics. Without a model, output uses `scoring_mode: heuristic` and a `base_score` from the weighted feature heuristic (not ML).
+Point `scoring.model_path` in `config/crank.yaml` at the trained model. When a model is loaded, it is used directly (`scoring_mode: ml`); without one, crank falls back to a hand-tuned weighted heuristic (`scoring_mode: heuristic`).
 
 Config is auto-discovered from `./config/crank.yaml` or `~/.config/crank/config.yaml` when `--config` is omitted. YAML keyword rules are merged onto built-in defaults (same `pattern` overrides the default).
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│ K8s API         │────▶│ FeatureExtractor │────▶│ ClusterScorer   │
-│ (state+events)  │     │ (20 features)    │     │ ML + heuristic  │
-└─────────────────┘     └──────────────────┘     └────────┬────────┘
-                                                          │
-┌─────────────────┐     ┌──────────────────┐              ▼
-│ searchable text │────▶│ KeywordMatcher   │────▶   ClusterRanker
-│ (names, events) │     │ (area boosts)    │         (final rank)
-└─────────────────┘     └──────────────────┘
+┌─────────────────┐     ┌──────────────────┐
+│ K8s API         │────▶│ FeatureExtractor │──┐
+│ (state+events)  │     │ (20 base feat.)  │  │
+└─────────────────┘     └──────────────────┘  │  ┌─────────────────┐
+                                              ├─▶│ ClusterScorer   │
+┌─────────────────┐     ┌──────────────────┐  │  │ ML or heuristic │
+│ searchable text │────▶│ KeywordMatcher   │──┘  └────────┬────────┘
+│ (names, events) │     │ (5 area scores)  │              │
+└─────────────────┘     └──────────────────┘              ▼
+                                                    ClusterRanker
+                                                     (final rank)
 ```
+
+Keyword area scores are included in the feature vector (25 features total: 20 base + 5 keyword) so the model learns how operator-interest context interacts with cluster health signals.
 
 ### Attention areas
 
@@ -63,7 +67,9 @@ Customize patterns in `config/crank.yaml`.
 
 ### Features (ML input)
 
-Ratios and rates include: node NotReady/pressure, pod failure/crash/privilege signals, pending age, event rates (warnings, OOM, evictions, backoff), and workload availability (Deployments, StatefulSets, DaemonSets).
+**Base features (20):** node NotReady/pressure ratios, pod failure/crash/privilege signals, pending age, event rates (warnings, OOM, evictions, backoff), and workload availability (Deployments, StatefulSets, DaemonSets).
+
+**Keyword features (5):** one per attention area (reliability, security, capacity, compliance, platform), populated from keyword matcher scores.
 
 ## Configuration
 
@@ -71,18 +77,26 @@ See `config/crank.yaml`. Key knobs:
 
 - `event_window_hours` — how far back to scan events (default 24h)
 - `keywords` — substring patterns → area + weight
-- `scoring.keyword_boost_cap` — max keyword add-on (default 25)
-- `scoring.ml_weight` — blend trained model vs heuristic (default 0.7)
+- `scoring.keyword_boost_cap` — max aggregate keyword score returned by the matcher (default 25)
+- `scoring.model_path` — path to a trained model file (`.joblib`)
 
 ## Training with operator feedback
 
-Export labeled snapshots as JSONL (one object per line):
+Training uses **ranked sessions**: during a triage session, operators rank the clusters they reviewed by how much attention each deserved. Each JSONL row includes a `session` identifier and an ordinal `rank` (1 = most attention needed).
 
 ```json
-{"name": "prod-us", "label": 85, "nodes": {"total": 50, "not_ready": 2}, "pods": {"total": 800, "crash_loop_backoff": 4}, "deployments_total": 120, "deployments_unavailable": 5, "events": {"warnings": 80}, "searchable_text": ["prod payment oom"]}
+{"session": "2026-05-19-triage", "rank": 1, "name": "prod-eu-pci", "nodes": {"total": 30, "not_ready": 3}, ...}
+{"session": "2026-05-19-triage", "rank": 2, "name": "prod-us-east", "nodes": {"total": 50, "not_ready": 2}, ...}
+{"session": "2026-05-20-oncall", "rank": 1, "name": "prod-ca", "nodes": {"total": 15, "not_ready": 1}, ...}
 ```
 
-`label` is how much attention the cluster deserved (0–100), e.g. from post-incident review or on-call triage. Training requires at least 10 labeled rows and prints validation MAE/R². Retrain periodically so the model reflects your environment.
+Pairs are generated within each session, so rankings from different days or conditions don't contaminate each other. The same cluster can appear in multiple sessions with different ranks as conditions change. A session needs at least 2 clusters; training requires at least 10 total snapshots across all sessions.
+
+Internally, crank fits a logistic regression on feature differences between pairs (pairwise learning-to-rank). The learned coefficient vector becomes the scoring function: `score(cluster) = coef . features(cluster)`. Raw scores are calibrated to 0–100 via min-max scaling on the training data. At inference, each cluster is scored independently and sorted -- no pairwise queries needed.
+
+Training prints `pairwise_accuracy` (fraction of pairs correctly ordered) and `kendall_tau` (rank correlation). Retrain periodically so the model reflects your environment.
+
+The `train` command accepts `--config` so keyword rules used during training match those used at scoring time.
 
 ## Development
 

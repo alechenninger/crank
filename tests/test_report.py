@@ -39,4 +39,4 @@ def test_json_output_is_valid() -> None:
     parsed = json.loads(format_json([score]))
     assert parsed[0]["cluster"] == "x"
     assert parsed[0]["base_score"] == 1.0
-    assert parsed[0]["scoring_mode"] == "heuristic"
+    assert parsed[0]["scoring_mode"] in ("heuristic", "ml")

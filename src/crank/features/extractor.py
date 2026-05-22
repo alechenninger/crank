@@ -4,14 +4,9 @@ from __future__ import annotations
 
 import math
 
-from crank.types import ClusterSnapshot, FeatureVector
+from crank.types import AreaContribution, AttentionArea, ClusterSnapshot, FeatureVector
 
-# Indices of ratio features in FEATURE_NAMES (bounded 0–1); others are rates or scaled age.
-RATIO_FEATURE_INDICES: frozenset[int] = frozenset(
-    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19}
-)
-
-FEATURE_NAMES: tuple[str, ...] = (
+BASE_FEATURE_NAMES: tuple[str, ...] = (
     "node_not_ready_ratio",
     "node_pressure_ratio",
     "pod_failed_ratio",
@@ -34,6 +29,19 @@ FEATURE_NAMES: tuple[str, ...] = (
     "daemonset_misscheduled_ratio",
 )
 
+KEYWORD_FEATURE_NAMES: tuple[str, ...] = tuple(
+    f"keyword_{area.value}" for area in AttentionArea
+)
+
+FEATURE_NAMES: tuple[str, ...] = BASE_FEATURE_NAMES + KEYWORD_FEATURE_NAMES
+
+N_BASE_FEATURES: int = len(BASE_FEATURE_NAMES)
+
+# Indices of ratio features (bounded 0-1); others are rates, scaled age, or keyword scores.
+RATIO_FEATURE_INDICES: frozenset[int] = frozenset(
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19}
+)
+
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
     if denominator <= 0:
@@ -49,10 +57,19 @@ def _rate(count: int, window_hours: float) -> float:
     return math.log1p(per_hour)
 
 
+def keyword_feature_values(
+    area_contributions: tuple[AreaContribution, ...],
+) -> tuple[float, ...]:
+    """Convert keyword area contributions into feature values (one per AttentionArea)."""
+    area_scores = {a.area: a.score for a in area_contributions}
+    return tuple(area_scores.get(area, 0.0) for area in AttentionArea)
+
+
 class FeatureExtractor:
     """Hybrid state + event feature engineering."""
 
     def extract(self, snapshot: ClusterSnapshot) -> FeatureVector:
+        """Extract base features only (no keyword features)."""
         nodes = snapshot.nodes
         pods = snapshot.pods
         events = snapshot.events
@@ -97,4 +114,17 @@ class FeatureExtractor:
             _safe_ratio(snapshot.statefulsets_not_ready, sts_denom),
             _safe_ratio(snapshot.daemonsets_misscheduled, ds_denom),
         )
-        return FeatureVector(names=FEATURE_NAMES, values=values)
+        return FeatureVector(names=BASE_FEATURE_NAMES, values=values)
+
+    def extract_full(
+        self,
+        snapshot: ClusterSnapshot,
+        area_contributions: tuple[AreaContribution, ...],
+    ) -> FeatureVector:
+        """Extract base features augmented with keyword area scores."""
+        base = self.extract(snapshot)
+        kw_values = keyword_feature_values(area_contributions)
+        return FeatureVector(
+            names=FEATURE_NAMES,
+            values=base.values + kw_values,
+        )
