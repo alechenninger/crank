@@ -14,15 +14,36 @@ from crank.model.scorer import (
     ClusterScorer,
     HeuristicScorer,
     ModelSchemaError,
-    _generate_pairs,
 )
-from crank.training import train_from_dataset
+from crank.training import _generate_pairs
 from crank.types import ClusterIdentity, ClusterSnapshot, FeatureVector, NodeState
 
 
 def _features(**kwargs: float) -> FeatureVector:
     values = tuple(kwargs.get(n, 0.0) for n in FEATURE_NAMES)
     return FeatureVector(names=FEATURE_NAMES, values=values)
+
+
+def test_heuristic_all_zero_features_scores_zero() -> None:
+    scorer = HeuristicScorer()
+    assert scorer.score(_features()) == 0.0
+
+
+def test_score_vector_returns_midpoint_when_calibration_span_is_zero(tmp_path: Path) -> None:
+    """When cal_min == cal_max, score_vector should return 50.0."""
+    coef = np.ones(len(FEATURE_NAMES))
+    payload = {
+        "coef": coef,
+        "calibration_min": 5.0,
+        "calibration_max": 5.0,
+        "feature_names": FEATURE_NAMES,
+        "schema_version": 3,
+    }
+    model_path = tmp_path / "flat.joblib"
+    joblib.dump(payload, model_path)
+    scorer = ClusterScorer(model_path=model_path)
+    fv = _features(node_not_ready_ratio=0.5)
+    assert scorer.score_vector(fv) == 50.0
 
 
 def test_heuristic_scores_higher_with_more_signals() -> None:
@@ -43,15 +64,12 @@ def test_heuristic_includes_keyword_features() -> None:
 def test_heuristic_mode_without_model() -> None:
     cluster_scorer = ClusterScorer()
     assert not cluster_scorer.has_trained_model
-    assert cluster_scorer.scoring_mode().value == "heuristic"
+    assert cluster_scorer.scoring_mode.value == "heuristic"
 
 
-def test_ml_mode_with_trained_model(tmp_path: Path) -> None:
-    dataset = Path(__file__).resolve().parents[1] / "examples" / "training_dataset.jsonl"
-    model_path = tmp_path / "model.joblib"
-    train_from_dataset(dataset, model_path)
-    scorer = ClusterScorer(model_path=model_path)
-    assert scorer.scoring_mode().value == "ml"
+def test_ml_mode_with_trained_model(trained_model_path: Path) -> None:
+    scorer = ClusterScorer(model_path=trained_model_path)
+    assert scorer.scoring_mode.value == "ml"
 
     snap = ClusterSnapshot(
         identity=ClusterIdentity(name="t"),
@@ -61,18 +79,15 @@ def test_ml_mode_with_trained_model(tmp_path: Path) -> None:
     config = ScoringConfig()
     extractor = FeatureExtractor()
     matcher = KeywordMatcher(config)
-    _, areas = matcher.match(snap)
+    areas = matcher.match(snap)
     fv = extractor.extract_full(snap, areas)
     score = scorer.score_vector(fv)
     assert 0.0 <= score <= 100.0
 
 
-def test_ml_score_differs_from_heuristic(tmp_path: Path) -> None:
+def test_ml_score_differs_from_heuristic(trained_model_path: Path) -> None:
     """With a trained model, score comes from learned coef, not heuristic weights."""
-    dataset = Path(__file__).resolve().parents[1] / "examples" / "training_dataset.jsonl"
-    model_path = tmp_path / "model.joblib"
-    train_from_dataset(dataset, model_path)
-    ml_scorer = ClusterScorer(model_path=model_path)
+    ml_scorer = ClusterScorer(model_path=trained_model_path)
     heuristic_scorer = HeuristicScorer()
 
     fv = _features(
@@ -94,12 +109,8 @@ def test_heuristic_keyword_contribution() -> None:
     assert scorer.keyword_contribution(with_kw) == pytest.approx(5.0, abs=0.01)
 
 
-def test_ml_keyword_contribution_is_non_negative(tmp_path: Path) -> None:
-    dataset = Path(__file__).resolve().parents[1] / "examples" / "training_dataset.jsonl"
-    model_path = tmp_path / "model.joblib"
-    train_from_dataset(dataset, model_path)
-    scorer = ClusterScorer(model_path=model_path)
-
+def test_ml_keyword_contribution_is_non_negative(trained_model_path: Path) -> None:
+    scorer = ClusterScorer(model_path=trained_model_path)
     fv = _features(node_not_ready_ratio=0.5, keyword_reliability=5.0)
     assert scorer.keyword_contribution(fv) >= 0.0
 
@@ -145,12 +156,9 @@ def test_pair_generation_no_cross_session_pairs() -> None:
     assert len(diffs) == 0
 
 
-def test_trained_model_orders_sick_above_healthy(tmp_path: Path) -> None:
+def test_trained_model_orders_sick_above_healthy(trained_model_path: Path) -> None:
     """A model trained on the example dataset should score sicker clusters higher."""
-    dataset = Path(__file__).resolve().parents[1] / "examples" / "training_dataset.jsonl"
-    model_path = tmp_path / "model.joblib"
-    train_from_dataset(dataset, model_path)
-    scorer = ClusterScorer(model_path=model_path)
+    scorer = ClusterScorer(model_path=trained_model_path)
 
     sick = _features(
         node_not_ready_ratio=0.5,
@@ -161,12 +169,9 @@ def test_trained_model_orders_sick_above_healthy(tmp_path: Path) -> None:
     assert scorer.score_vector(sick) > scorer.score_vector(healthy)
 
 
-def test_calibrated_scores_in_range(tmp_path: Path) -> None:
+def test_calibrated_scores_in_range(trained_model_path: Path) -> None:
     """All scores from a trained model should fall in [0, 100]."""
-    dataset = Path(__file__).resolve().parents[1] / "examples" / "training_dataset.jsonl"
-    model_path = tmp_path / "model.joblib"
-    train_from_dataset(dataset, model_path)
-    scorer = ClusterScorer(model_path=model_path)
+    scorer = ClusterScorer(model_path=trained_model_path)
 
     for nr in (0.0, 0.1, 0.5, 1.0):
         for cl in (0.0, 0.05, 0.2, 0.5):
@@ -175,11 +180,8 @@ def test_calibrated_scores_in_range(tmp_path: Path) -> None:
             assert 0.0 <= score <= 100.0, f"score {score} out of range for nr={nr}, cl={cl}"
 
 
-def test_top_features_with_trained_coef(tmp_path: Path) -> None:
-    dataset = Path(__file__).resolve().parents[1] / "examples" / "training_dataset.jsonl"
-    model_path = tmp_path / "model.joblib"
-    train_from_dataset(dataset, model_path)
-    scorer = ClusterScorer(model_path=model_path)
+def test_top_features_with_trained_coef(trained_model_path: Path) -> None:
+    scorer = ClusterScorer(model_path=trained_model_path)
 
     fv = _features(node_not_ready_ratio=0.5, pod_crash_loop_ratio=0.3)
     top = scorer.top_features(fv, limit=3)

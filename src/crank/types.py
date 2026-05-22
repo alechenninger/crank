@@ -79,6 +79,18 @@ class EventSummary:
 
 
 @dataclass
+class WorkloadState:
+    """Aggregated higher-level workload health (deployments, statefulsets, daemonsets)."""
+
+    deployments_total: int = 0
+    deployments_unavailable: int = 0
+    statefulsets_total: int = 0
+    statefulsets_not_ready: int = 0
+    daemonsets_total: int = 0
+    daemonsets_misscheduled: int = 0
+
+
+@dataclass
 class ClusterSnapshot:
     """Point-in-time cluster state plus recent events."""
 
@@ -87,15 +99,34 @@ class ClusterSnapshot:
     nodes: NodeState = field(default_factory=NodeState)
     pods: PodState = field(default_factory=PodState)
     events: EventSummary = field(default_factory=EventSummary)
+    workloads: WorkloadState = field(default_factory=WorkloadState)
     namespaces: int = 0
-    deployments_total: int = 0
-    deployments_unavailable: int = 0
-    statefulsets_total: int = 0
-    statefulsets_not_ready: int = 0
-    daemonsets_total: int = 0
-    daemonsets_misscheduled: int = 0
     # Raw text blobs for keyword matching (names, reasons, messages).
     searchable_text: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def deployments_total(self) -> int:
+        return self.workloads.deployments_total
+
+    @property
+    def deployments_unavailable(self) -> int:
+        return self.workloads.deployments_unavailable
+
+    @property
+    def statefulsets_total(self) -> int:
+        return self.workloads.statefulsets_total
+
+    @property
+    def statefulsets_not_ready(self) -> int:
+        return self.workloads.statefulsets_not_ready
+
+    @property
+    def daemonsets_total(self) -> int:
+        return self.workloads.daemonsets_total
+
+    @property
+    def daemonsets_misscheduled(self) -> int:
+        return self.workloads.daemonsets_misscheduled
 
 
 @dataclass(frozen=True)
@@ -125,9 +156,23 @@ class ScoringMode(StrEnum):
     ML = "ml"
 
 
-@dataclass
+@dataclass(frozen=True)
+class ScoredCluster:
+    """Scored but not yet ranked cluster output."""
+
+    identity: ClusterIdentity
+    total_score: float
+    base_score: float
+    scoring_mode: ScoringMode
+    keyword_boost: float
+    area_contributions: tuple[AreaContribution, ...]
+    top_features: tuple[tuple[str, float], ...]
+    summary: str
+
+
+@dataclass(frozen=True)
 class ClusterScore:
-    """Final ranking output for one cluster."""
+    """Final ranked output for one cluster."""
 
     identity: ClusterIdentity
     rank: int

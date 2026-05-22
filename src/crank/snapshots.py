@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from crank.types import (
     ClusterIdentity,
@@ -13,6 +17,7 @@ from crank.types import (
     EventSummary,
     NodeState,
     PodState,
+    WorkloadState,
 )
 
 
@@ -38,32 +43,35 @@ def snapshot_from_dict(data: dict[str, Any]) -> ClusterSnapshot:
     name = payload.pop("name", "unknown")
     context = payload.pop("context", None)
     payload.pop("label", None)
-    payload.pop("session", None)
-    payload.pop("rank", None)
     identity = ClusterIdentity(name=name, context=context)
-    return ClusterSnapshot(
+    snapshot = ClusterSnapshot(
         identity=identity,
         collected_at=_parse_collected_at(payload.pop("collected_at", None)),
         nodes=NodeState(**payload.pop("nodes", {})),
         pods=PodState(**payload.pop("pods", {})),
         events=EventSummary(**payload.pop("events", {})),
+        workloads=WorkloadState(
+            deployments_total=int(payload.pop("deployments_total", 0)),
+            deployments_unavailable=int(payload.pop("deployments_unavailable", 0)),
+            statefulsets_total=int(payload.pop("statefulsets_total", 0)),
+            statefulsets_not_ready=int(payload.pop("statefulsets_not_ready", 0)),
+            daemonsets_total=int(payload.pop("daemonsets_total", 0)),
+            daemonsets_misscheduled=int(payload.pop("daemonsets_misscheduled", 0)),
+        ),
         namespaces=int(payload.pop("namespaces", 0)),
-        deployments_total=int(payload.pop("deployments_total", 0)),
-        deployments_unavailable=int(payload.pop("deployments_unavailable", 0)),
-        statefulsets_total=int(payload.pop("statefulsets_total", 0)),
-        statefulsets_not_ready=int(payload.pop("statefulsets_not_ready", 0)),
-        daemonsets_total=int(payload.pop("daemonsets_total", 0)),
-        daemonsets_misscheduled=int(payload.pop("daemonsets_misscheduled", 0)),
         searchable_text=tuple(payload.pop("searchable_text", [])),
     )
+    if payload:
+        logger.warning("unknown snapshot fields ignored: %s", sorted(payload))
+    return snapshot
 
 
-def load_snapshots_jsonl(path: Path) -> list[ClusterSnapshot]:
+def load_snapshots_jsonl(path: Path | Traversable) -> list[ClusterSnapshot]:
     """Load snapshots from a JSONL file (one JSON object per line)."""
     snapshots: list[ClusterSnapshot] = []
     with path.open(encoding="utf-8") as fh:
         for line in fh:
-            line = line.strip()
+            line = line.strip()  # type: ignore[assignment]
             if not line:
                 continue
             snapshots.append(snapshot_from_dict(json.loads(line)))

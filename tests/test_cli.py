@@ -34,6 +34,13 @@ def test_train_command(tmp_path) -> None:
     assert out.exists()
 
 
+def test_score_demo_cluster() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["score", "--demo", "--cluster", "prod-eu-pci"])
+    assert result.exit_code == 0
+    assert "prod-eu-pci" in result.output
+
+
 def test_rank_requires_clusters_without_demo() -> None:
     runner = CliRunner()
     result = runner.invoke(main, ["rank"])

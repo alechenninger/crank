@@ -13,7 +13,7 @@ from crank.collector.kubernetes import KubernetesCollector
 from crank.config import load_config
 from crank.logging_config import configure_logging
 from crank.report import format_json, format_table
-from crank.resources import demo_clusters_path
+from crank.resources import demo_clusters_resource
 from crank.scoring.ranker import ClusterRanker
 from crank.snapshots import load_snapshots_jsonl
 from crank.training import train_from_dataset
@@ -61,7 +61,7 @@ def score(
         cfg = load_config(_resolve_config(config_path))
         ranker = ClusterRanker(cfg)
         if demo:
-            snaps = load_snapshots_jsonl(demo_clusters_path())
+            snaps = load_snapshots_jsonl(demo_clusters_resource())
             match = next((s for s in snaps if s.identity.name == cluster_name), snaps[0])
             results = ranker.rank_snapshots([match])
         else:
@@ -111,7 +111,7 @@ def rank(
         cfg = load_config(_resolve_config(config_path))
         ranker = ClusterRanker(cfg)
         if demo:
-            results = ranker.rank_snapshots(load_snapshots_jsonl(demo_clusters_path()))
+            results = ranker.rank_snapshots(load_snapshots_jsonl(demo_clusters_resource()))
         elif not clusters:
             raise click.UsageError("--clusters is required unless --demo is set")
         else:

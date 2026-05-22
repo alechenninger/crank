@@ -37,10 +37,14 @@ FEATURE_NAMES: tuple[str, ...] = BASE_FEATURE_NAMES + KEYWORD_FEATURE_NAMES
 
 N_BASE_FEATURES: int = len(BASE_FEATURE_NAMES)
 
-# Indices of ratio features (bounded 0-1); others are rates, scaled age, or keyword scores.
-RATIO_FEATURE_INDICES: frozenset[int] = frozenset(
-    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19}
+BOUNDED_FEATURE_INDICES: frozenset[int] = frozenset(
+    i
+    for i, name in enumerate(BASE_FEATURE_NAMES)
+    if name.endswith("_ratio") or name == "pending_age_hours"
 )
+
+# Legacy alias
+RATIO_FEATURE_INDICES = BOUNDED_FEATURE_INDICES
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:

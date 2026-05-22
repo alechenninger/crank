@@ -18,22 +18,41 @@ def test_keyword_boosts_security_area() -> None:
         collected_at=datetime.now(UTC),
         searchable_text=("prod/api privileged container",),
     )
-    boost, areas = KeywordMatcher(cfg).match(snap)
-    assert boost == 3.0
+    areas = KeywordMatcher(cfg).match(snap)
+    assert len(areas) == 1
     assert areas[0].area == AttentionArea.SECURITY
+    assert areas[0].score == 3.0
 
 
-def test_keyword_boost_is_capped() -> None:
-    rules = [
-        KeywordRule(f"kw{i}", AttentionArea.RELIABILITY, weight=10.0)
-        for i in range(10)
-    ]
-    cfg = ScoringConfig(keyword_rules=rules, keyword_boost_cap=25.0)
-    text = " ".join(f"kw{i}" for i in range(10))
+def test_multiple_areas_sorted_by_score() -> None:
+    cfg = ScoringConfig(
+        keyword_rules=[
+            KeywordRule("privileged", AttentionArea.SECURITY, weight=3.0),
+            KeywordRule("oom", AttentionArea.CAPACITY, weight=5.0),
+        ]
+    )
     snap = ClusterSnapshot(
         identity=ClusterIdentity(name="c"),
         collected_at=datetime.now(UTC),
-        searchable_text=(text,),
+        searchable_text=("oom privileged",),
     )
-    boost, _ = KeywordMatcher(cfg).match(snap)
-    assert boost == 25.0
+    areas = KeywordMatcher(cfg).match(snap)
+    assert len(areas) == 2
+    assert areas[0].area == AttentionArea.CAPACITY
+    assert areas[0].score == 5.0
+    assert areas[1].area == AttentionArea.SECURITY
+
+
+def test_no_match_returns_empty() -> None:
+    cfg = ScoringConfig(
+        keyword_rules=[
+            KeywordRule("privileged", AttentionArea.SECURITY, weight=3.0),
+        ]
+    )
+    snap = ClusterSnapshot(
+        identity=ClusterIdentity(name="c"),
+        collected_at=datetime.now(UTC),
+        searchable_text=("nothing relevant",),
+    )
+    areas = KeywordMatcher(cfg).match(snap)
+    assert areas == ()

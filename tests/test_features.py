@@ -19,6 +19,7 @@ from crank.types import (
     EventSummary,
     NodeState,
     PodState,
+    WorkloadState,
 )
 
 
@@ -93,14 +94,12 @@ def test_workload_ratios_use_totals_not_unavailable_only() -> None:
     large = ClusterSnapshot(
         identity=ClusterIdentity(name="large"),
         collected_at=datetime.now(UTC),
-        deployments_total=100,
-        deployments_unavailable=12,
+        workloads=WorkloadState(deployments_total=100, deployments_unavailable=12),
     )
     small = ClusterSnapshot(
         identity=ClusterIdentity(name="small"),
         collected_at=datetime.now(UTC),
-        deployments_total=12,
-        deployments_unavailable=12,
+        workloads=WorkloadState(deployments_total=12, deployments_unavailable=12),
     )
     ext = FeatureExtractor()
     large_ratio = ext.extract(large).as_dict()["deployment_unavailable_ratio"]
@@ -108,6 +107,23 @@ def test_workload_ratios_use_totals_not_unavailable_only() -> None:
     assert large_ratio < small_ratio
     assert abs(large_ratio - 0.12) < 0.01
     assert abs(small_ratio - 1.0) < 0.01
+
+
+def test_rate_with_zero_window_returns_zero() -> None:
+    from crank.features.extractor import _rate
+
+    assert _rate(10, 0.0) == 0.0
+    assert _rate(0, 0.0) == 0.0
+
+
+def test_ratio_feature_indices_match_feature_names() -> None:
+    """Guard against RATIO_FEATURE_INDICES drifting from BASE_FEATURE_NAMES."""
+    expected = frozenset(
+        i
+        for i, name in enumerate(BASE_FEATURE_NAMES)
+        if name.endswith("_ratio") or name == "pending_age_hours"
+    )
+    assert RATIO_FEATURE_INDICES == expected
 
 
 def test_keyword_feature_values_from_area_contributions() -> None:

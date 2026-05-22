@@ -58,6 +58,31 @@ def test_keyword_boost_integrated_into_total_score() -> None:
     assert no_kw.keyword_boost == 0.0
 
 
+def test_base_score_is_never_negative() -> None:
+    """base_score = total_score - keyword_boost must be floored at 0.
+
+    When keyword contribution exceeds the 100-point score cap, the subtraction
+    total_score - keyword_boost would go negative without a floor.
+    """
+    from crank.config import KeywordRule
+    from crank.types import AttentionArea
+
+    heavy_keyword_rules = [
+        KeywordRule("megaboost", AttentionArea.RELIABILITY, weight=200.0),
+    ]
+    cfg = ScoringConfig(keyword_rules=heavy_keyword_rules, keyword_boost_cap=300.0)
+    ranker = ClusterRanker(cfg)
+    snap = ClusterSnapshot(
+        identity=ClusterIdentity(name="keyword-heavy"),
+        collected_at=datetime.now(UTC),
+        nodes=NodeState(total=1, ready=1),
+        pods=PodState(total=1, running=1),
+        searchable_text=("megaboost",),
+    )
+    result = ranker.score_snapshot(snap)
+    assert result.base_score >= 0.0, f"base_score was {result.base_score}"
+
+
 def test_pci_prod_cluster_scores_highest_in_demo_set() -> None:
     """Regression: prod-eu-pci demo should beat dev-eu."""
     path = Path(__file__).resolve().parents[1] / "examples" / "demo_clusters.jsonl"

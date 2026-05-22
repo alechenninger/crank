@@ -11,7 +11,13 @@ from crank.config import ScoringConfig
 from crank.features.extractor import FeatureExtractor
 from crank.keywords.matcher import KeywordMatcher
 from crank.model.scorer import ClusterScorer
-from crank.types import AreaContribution, ClusterScore, ClusterSnapshot, ScoringMode
+from crank.types import (
+    AreaContribution,
+    ClusterScore,
+    ClusterSnapshot,
+    ScoredCluster,
+    ScoringMode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +61,17 @@ class ClusterRanker:
         self._matcher = KeywordMatcher(config)
         self._scorer = ClusterScorer(model_path=config.model_path)
 
-    def score_snapshot(self, snapshot: ClusterSnapshot) -> ClusterScore:
-        _, areas = self._matcher.match(snapshot)
+    def score_snapshot(self, snapshot: ClusterSnapshot) -> ScoredCluster:
+        areas = self._matcher.match(snapshot)
         features = self._extractor.extract_full(snapshot, areas)
         total_score = self._scorer.score_vector(features)
-        scoring_mode = self._scorer.scoring_mode()
+        scoring_mode = self._scorer.scoring_mode
         keyword_boost = self._scorer.keyword_contribution(features)
 
-        base_score = total_score - keyword_boost
+        base_score = max(0.0, total_score - keyword_boost)
 
-        return ClusterScore(
+        return ScoredCluster(
             identity=snapshot.identity,
-            rank=0,
             total_score=round(total_score, 2),
             base_score=round(base_score, 2),
             scoring_mode=scoring_mode,
@@ -96,8 +101,22 @@ class ClusterRanker:
         return snapshots
 
     def rank_snapshots(self, snapshots: list[ClusterSnapshot]) -> list[ClusterScore]:
-        scores = [self.score_snapshot(s) for s in snapshots]
-        scores.sort(key=lambda s: s.total_score, reverse=True)
-        for i, score in enumerate(scores, start=1):
-            score.rank = i
-        return scores
+        scored = sorted(
+            (self.score_snapshot(s) for s in snapshots),
+            key=lambda s: s.total_score,
+            reverse=True,
+        )
+        return [
+            ClusterScore(
+                identity=s.identity,
+                rank=i,
+                total_score=s.total_score,
+                base_score=s.base_score,
+                scoring_mode=s.scoring_mode,
+                keyword_boost=s.keyword_boost,
+                area_contributions=s.area_contributions,
+                top_features=s.top_features,
+                summary=s.summary,
+            )
+            for i, s in enumerate(scored, start=1)
+        ]

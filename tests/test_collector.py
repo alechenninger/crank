@@ -5,13 +5,40 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from crank.collector.kubernetes import KubernetesCollector
 
 
-def _list_response(items: list[Any]) -> SimpleNamespace:
-    return SimpleNamespace(items=items, metadata=SimpleNamespace(_continue=None))
+class _FakeListResponse:
+    """Mimics the Kubernetes list API response with pagination support."""
+
+    def __init__(self, items: list[Any], continue_token: str | None = None) -> None:
+        self.items = items
+        self.metadata = SimpleNamespace(_continue=continue_token)
+
+
+class FakeApi:
+    """In-memory fake for CoreV1Api / AppsV1Api list methods.
+
+    Register items for each list method, then pass to the collector via patch.
+    """
+
+    def __init__(self) -> None:
+        self._resources: dict[str, list[Any]] = {}
+
+    def set_resources(self, method_name: str, items: list[Any]) -> None:
+        self._resources[method_name] = items
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        items = self._resources.get(name, [])
+
+        def list_fn(**_kwargs: Any) -> _FakeListResponse:
+            return _FakeListResponse(items)
+
+        return list_fn
 
 
 def _node(ready: bool = True, memory_pressure: bool = False) -> SimpleNamespace:
@@ -89,25 +116,27 @@ def _event(reason: str, message: str = "", hours_ago: float = 1.0) -> SimpleName
     )
 
 
+def _make_collector(
+    core: FakeApi,
+    apps: FakeApi,
+    cluster_name: str = "test",
+) -> KubernetesCollector:
+    with patch("crank.collector.kubernetes._create_api_clients") as mock:
+        mock.return_value = (core, apps)
+        return KubernetesCollector(cluster_name=cluster_name)
+
+
 @patch("crank.collector.kubernetes._create_api_clients")
-def test_collect_aggregates_nodes_pods_and_workloads(mock_clients: MagicMock) -> None:
-    core = MagicMock()
-    apps = MagicMock()
+def test_collect_aggregates_nodes_pods_and_workloads(mock_clients: Any) -> None:
+    core = FakeApi()
+    apps = FakeApi()
     mock_clients.return_value = (core, apps)
 
-    core.list_node.side_effect = [_list_response([_node(ready=False), _node()])]
-    core.list_pod_for_all_namespaces.side_effect = [
-        _list_response([_pod(reason="CrashLoopBackOff")])
-    ]
-    core.list_event_for_all_namespaces.side_effect = [
-        _list_response([_event("OOMKilling", "oomkilled")])
-    ]
-    core.list_namespace.side_effect = [_list_response([SimpleNamespace()])]
-    apps.list_deployment_for_all_namespaces.side_effect = [
-        _list_response([_deployment(desired=3, available=1)])
-    ]
-    apps.list_stateful_set_for_all_namespaces.side_effect = [_list_response([])]
-    apps.list_daemon_set_for_all_namespaces.side_effect = [_list_response([])]
+    core.set_resources("list_node", [_node(ready=False), _node()])
+    core.set_resources("list_pod_for_all_namespaces", [_pod(reason="CrashLoopBackOff")])
+    core.set_resources("list_event_for_all_namespaces", [_event("OOMKilling", "oomkilled")])
+    core.set_resources("list_namespace", [SimpleNamespace()])
+    apps.set_resources("list_deployment_for_all_namespaces", [_deployment(desired=3, available=1)])
 
     collector = KubernetesCollector(cluster_name="test")
     snap = collector.collect()
@@ -119,3 +148,33 @@ def test_collect_aggregates_nodes_pods_and_workloads(mock_clients: MagicMock) ->
     assert snap.events.oom_killed == 1
     assert snap.deployments_total == 1
     assert snap.deployments_unavailable == 1
+    assert snap.statefulsets_total == 0
+    assert snap.daemonsets_total == 0
+
+
+@patch("crank.collector.kubernetes._create_api_clients")
+def test_collect_statefulsets_and_daemonsets(mock_clients: Any) -> None:
+    core = FakeApi()
+    apps = FakeApi()
+    mock_clients.return_value = (core, apps)
+
+    core.set_resources("list_node", [_node()])
+    core.set_resources("list_pod_for_all_namespaces", [_pod()])
+    core.set_resources("list_event_for_all_namespaces", [])
+    core.set_resources("list_namespace", [SimpleNamespace()])
+    apps.set_resources(
+        "list_stateful_set_for_all_namespaces",
+        [_statefulset(desired=5, ready=3), _statefulset(desired=2, ready=2)],
+    )
+    apps.set_resources(
+        "list_daemon_set_for_all_namespaces",
+        [_daemonset(misscheduled=2), _daemonset(misscheduled=0)],
+    )
+
+    collector = KubernetesCollector(cluster_name="test-workloads")
+    snap = collector.collect()
+
+    assert snap.statefulsets_total == 2
+    assert snap.statefulsets_not_ready == 1
+    assert snap.daemonsets_total == 2
+    assert snap.daemonsets_misscheduled == 1

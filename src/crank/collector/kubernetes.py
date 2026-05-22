@@ -7,7 +7,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kubernetes import client, config
-from kubernetes.client import ApiClient, AppsV1Api, CoreV1Api
+from kubernetes.client import ApiClient, AppsV1Api, Configuration, CoreV1Api
+from kubernetes.config.incluster_config import InClusterConfigLoader
 
 from crank.collector.pagination import list_all_pages
 from crank.types import (
@@ -16,6 +17,7 @@ from crank.types import (
     EventSummary,
     NodeState,
     PodState,
+    WorkloadState,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,8 +80,11 @@ def _create_api_clients(
         )
     else:
         try:
-            config.load_incluster_config()
-            api_client = client.ApiClient()
+            cfg = Configuration()
+            InClusterConfigLoader(
+                token_filename=None, cert_filename=None
+            ).load_and_set(client_configuration=cfg)
+            api_client = ApiClient(configuration=cfg)
         except config.ConfigException:
             api_client = config.new_client_from_config(context=context)
     return CoreV1Api(api_client), AppsV1Api(api_client)
@@ -113,14 +118,7 @@ class KubernetesCollector:
         pods, pod_text = self._collect_pods(now)
         events, event_text = self._collect_events(now)
         namespaces = sum(1 for _ in list_all_pages(self._core.list_namespace))
-        (
-            deploy_total,
-            deploy_unavail,
-            sts_total,
-            sts_not_ready,
-            ds_total,
-            ds_mis,
-        ) = self._collect_workloads()
+        workloads = self._collect_workloads()
         searchable = tuple(pod_text + event_text)
         return ClusterSnapshot(
             identity=self._identity,
@@ -128,13 +126,8 @@ class KubernetesCollector:
             nodes=nodes,
             pods=pods,
             events=events,
+            workloads=workloads,
             namespaces=namespaces,
-            deployments_total=deploy_total,
-            deployments_unavailable=deploy_unavail,
-            statefulsets_total=sts_total,
-            statefulsets_not_ready=sts_not_ready,
-            daemonsets_total=ds_total,
-            daemonsets_misscheduled=ds_mis,
             searchable_text=searchable,
         )
 
@@ -253,27 +246,22 @@ class KubernetesCollector:
                 summary.certificate_expiry += 1
         return summary, text
 
-    def _collect_workloads(self) -> tuple[int, int, int, int, int, int]:
-        deploy_total = 0
-        deploy_unavail = 0
+    def _collect_workloads(self) -> WorkloadState:
+        state = WorkloadState()
         for d in list_all_pages(self._apps.list_deployment_for_all_namespaces):  # type: ignore[var-annotated]
-            deploy_total += 1
+            state.deployments_total += 1
             desired = d.spec.replicas or 0
             avail = d.status.available_replicas or 0
             if avail < desired:
-                deploy_unavail += 1
-        sts_total = 0
-        sts_not_ready = 0
+                state.deployments_unavailable += 1
         for s in list_all_pages(self._apps.list_stateful_set_for_all_namespaces):  # type: ignore[var-annotated]
-            sts_total += 1
+            state.statefulsets_total += 1
             ready = s.status.ready_replicas or 0
             desired = s.spec.replicas or 0
             if ready < desired:
-                sts_not_ready += 1
-        ds_total = 0
-        ds_mis = 0
+                state.statefulsets_not_ready += 1
         for ds in list_all_pages(self._apps.list_daemon_set_for_all_namespaces):  # type: ignore[var-annotated]
-            ds_total += 1
+            state.daemonsets_total += 1
             if (ds.status.number_misscheduled or 0) > 0:
-                ds_mis += 1
-        return deploy_total, deploy_unavail, sts_total, sts_not_ready, ds_total, ds_mis
+                state.daemonsets_misscheduled += 1
+        return state

@@ -4,17 +4,143 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
+from datetime import UTC, datetime
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+import joblib
+import numpy as np
+import sklearn
+from scipy.stats import kendalltau
+from sklearn.linear_model import LogisticRegression
+
 from crank.config import ScoringConfig
-from crank.features.extractor import FeatureExtractor
+from crank.features.extractor import FEATURE_NAMES, FeatureExtractor
 from crank.keywords.matcher import KeywordMatcher
-from crank.model.scorer import ClusterScorer
+from crank.model.scorer import MODEL_SCHEMA_VERSION
 from crank.snapshots import snapshot_from_dict
 from crank.types import ClusterSnapshot, FeatureVector
 
 logger = logging.getLogger(__name__)
+
+MIN_TRAINING_SAMPLES = 10
+
+
+def _generate_pairs(
+    X: np.ndarray,
+    ranks: list[int],
+    session_ids: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate pairwise training samples from ranked sessions.
+
+    For each session, every pair (i, j) where rank[i] < rank[j]
+    (lower rank = more attention) produces two symmetric rows so that
+    LogisticRegression sees both classes:
+
+    - X[i] - X[j] with label 1  (preferred first)
+    - X[j] - X[i] with label 0  (non-preferred first)
+    """
+    groups: dict[str, list[int]] = defaultdict(list)
+    for idx, sid in enumerate(session_ids):
+        groups[sid].append(idx)
+
+    diffs: list[np.ndarray] = []
+    labels: list[int] = []
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        for i, j in combinations(indices, 2):
+            if ranks[i] < ranks[j]:
+                preferred, other = i, j
+            elif ranks[j] < ranks[i]:
+                preferred, other = j, i
+            else:
+                continue
+            diffs.append(X[preferred] - X[other])
+            labels.append(1)
+            diffs.append(X[other] - X[preferred])
+            labels.append(0)
+    return np.array(diffs), np.array(labels)
+
+
+def train_model(
+    snapshots: list[ClusterSnapshot],
+    ranks: list[int],
+    session_ids: list[str],
+    features: list[FeatureVector],
+    output: Path,
+) -> dict[str, Any]:
+    """Train pairwise logistic regression from ranked sessions."""
+    if len(snapshots) < MIN_TRAINING_SAMPLES:
+        raise ValueError(
+            f"need at least {MIN_TRAINING_SAMPLES} snapshots to train, "
+            f"got {len(snapshots)}"
+        )
+
+    X = np.array([f.values for f in features])
+    X_pairs, y_pairs = _generate_pairs(X, ranks, session_ids)
+
+    if len(X_pairs) == 0:
+        raise ValueError(
+            "no valid pairs generated; each session needs at least 2 ranked snapshots"
+        )
+
+    clf = LogisticRegression(fit_intercept=False, C=1.0, max_iter=1000)
+    clf.fit(X_pairs, y_pairs)
+    coef = clf.coef_[0]
+
+    raw_scores = X @ coef
+    cal_min = float(raw_scores.min())
+    cal_max = float(raw_scores.max())
+
+    pair_correct = 0
+    pair_total = 0
+    groups: dict[str, list[int]] = defaultdict(list)
+    for idx, sid in enumerate(session_ids):
+        groups[sid].append(idx)
+    for indices in groups.values():
+        for i, j in combinations(indices, 2):
+            if ranks[i] == ranks[j]:
+                continue
+            pair_total += 1
+            if (ranks[i] < ranks[j]) == (raw_scores[i] > raw_scores[j]):
+                pair_correct += 1
+
+    pairwise_accuracy = pair_correct / pair_total if pair_total > 0 else 0.0
+
+    # Higher raw score should correlate with lower rank (more attention),
+    # so negate ranks for a positive tau when ordering is correct.
+    tau, _ = kendalltau(raw_scores, [-r for r in ranks])
+
+    metrics: dict[str, Any] = {
+        "pairwise_accuracy": float(pairwise_accuracy),
+        "kendall_tau": float(tau),
+        "n_pairs": len(X_pairs),
+    }
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "coef": coef,
+        "calibration_min": cal_min,
+        "calibration_max": cal_max,
+        "feature_names": FEATURE_NAMES,
+        "schema_version": MODEL_SCHEMA_VERSION,
+        "trained_at": datetime.now(UTC).isoformat(),
+        "sklearn_version": sklearn.__version__,
+        "metrics": metrics,
+        "n_samples": len(snapshots),
+    }
+    joblib.dump(payload, output)
+    logger.info(
+        "Trained model: n=%s pairs=%s pairwise_acc=%.3f tau=%.3f",
+        len(snapshots),
+        len(X_pairs),
+        pairwise_accuracy,
+        tau,
+    )
+    return metrics
 
 
 def train_from_dataset(
@@ -63,10 +189,7 @@ def train_from_dataset(
             snapshots.append(snapshot)
             ranks.append(rank)
             session_ids.append(session_id)
-            _, areas = matcher.match(snapshot)
+            areas = matcher.match(snapshot)
             features_list.append(extractor.extract_full(snapshot, areas))
 
-    metrics = ClusterScorer.train(
-        snapshots, ranks, session_ids, features_list, model_output,
-    )
-    return metrics
+    return train_model(snapshots, ranks, session_ids, features_list, model_output)

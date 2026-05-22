@@ -6,7 +6,8 @@ import joblib
 import numpy as np
 import pytest
 
-from crank.model.scorer import MIN_TRAINING_SAMPLES, ClusterScorer
+from crank.model.scorer import ClusterScorer
+from crank.training import MIN_TRAINING_SAMPLES
 from crank.training import train_from_dataset
 
 
@@ -28,13 +29,10 @@ def test_train_writes_model(tmp_path: Path) -> None:
     assert "n_pairs" in metrics
 
 
-def test_trained_model_uses_ml_mode(tmp_path: Path) -> None:
-    dataset = Path(__file__).resolve().parents[1] / "examples" / "training_dataset.jsonl"
-    out = tmp_path / "model.joblib"
-    train_from_dataset(dataset, out)
-    scorer = ClusterScorer(model_path=out)
+def test_trained_model_uses_ml_mode(trained_model_path: Path) -> None:
+    scorer = ClusterScorer(model_path=trained_model_path)
     assert scorer.has_trained_model
-    assert scorer.scoring_mode().value == "ml"
+    assert scorer.scoring_mode.value == "ml"
 
 
 def test_train_requires_minimum_samples(tmp_path: Path) -> None:
